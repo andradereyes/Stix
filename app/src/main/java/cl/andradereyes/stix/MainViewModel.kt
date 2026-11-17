@@ -17,6 +17,8 @@ import cl.andradereyes.stix.media.Transform
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -51,7 +53,6 @@ data class UiState(
     val added: Set<String> = emptySet(),
     val busy: Busy? = null,
     val editor: EditorState? = null,
-    val message: String? = null,
 )
 
 class MainViewModel(private val app: Application) : AndroidViewModel(app) {
@@ -59,6 +60,10 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
     val store = StickerStore(app)
     private val _state = MutableStateFlow(UiState(packs = store.packs()))
     val state = _state.asStateFlow()
+
+    // Los mensajes van por un canal: así no se pierden aunque la pantalla se redibuje.
+    private val _messages = Channel<String>(Channel.BUFFERED)
+    val messages = _messages.receiveAsFlow()
 
     private val sourceLock = Mutex()
     private var previewJob: Job? = null
@@ -210,15 +215,16 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
 
     // ---------- Mensajes ----------
 
-    fun showMessage(text: String) = _state.update { it.copy(message = text) }
-    fun consumeMessage() = _state.update { it.copy(message = null) }
+    fun showMessage(text: String) {
+        _messages.trySend(text)
+    }
 
     private fun friendly(e: Exception): String = when (e) {
         is UserError -> e.message ?: "Algo salió mal"
         is UnknownHostException -> "Sin conexión a internet"
         is SocketTimeoutException -> "El sitio tardó demasiado en responder"
-        is IOException -> "No se pudo descargar"
-        else -> "Algo salió mal (${e.javaClass.simpleName})"
+        is IOException -> "No se pudo descargar (${e.message ?: e.javaClass.simpleName})"
+        else -> "Algo salió mal (${e.javaClass.simpleName}: ${e.message ?: "sin detalle"})"
     }
 
     override fun onCleared() {

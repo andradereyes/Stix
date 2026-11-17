@@ -59,17 +59,51 @@ object Downloader {
         val id = Regex("""/status(?:es)?/(\d+)""").find(path)?.groupValues?.get(1)
             ?: throw UserError("No encontré el tweet en ese link")
         val index = Regex("""/(?:photo|video)/(\d+)""").find(path)?.groupValues?.get(1)?.toIntOrNull()
-        return try {
-            val json = JSONObject(readText("https://api.fxtwitter.com/status/$id"))
-            val all = json.getJSONObject("tweet").optJSONObject("media")?.optJSONArray("all")
-            if (all == null || all.length() == 0) throw UserError("Ese tweet no tiene fotos ni videos")
-            val i = ((index ?: 1) - 1).coerceIn(0, all.length() - 1)
-            all.getJSONObject(i).getString("url")
-        } catch (e: UserError) {
-            throw e
-        } catch (e: Exception) {
-            "https://d.fixupx.com$path"
+        // API v2 (respuesta en "status") y v1 (respuesta en "tweet"), por si una de las dos cambia.
+        var sawPost = false
+        for (api in listOf("https://api.fxtwitter.com/2/status/$id", "https://api.fxtwitter.com/status/$id")) {
+            val json = runCatching { JSONObject(readText(api)) }.getOrNull() ?: continue
+            val post = json.optJSONObject("status") ?: json.optJSONObject("tweet") ?: continue
+            sawPost = true
+            val urls = mediaUrls(post).ifEmpty {
+                // Si el tweet cita a otro que sí tiene el video, se usa ese.
+                post.optJSONObject("quote")?.let { mediaUrls(it) } ?: emptyList()
+            }
+            if (urls.isNotEmpty()) return urls[((index ?: 1) - 1).coerceIn(0, urls.size - 1)]
         }
+        if (sawPost) throw UserError("Ese tweet no tiene fotos ni videos")
+        return "https://d.fixupx.com$path"
+    }
+
+    private fun mediaUrls(post: JSONObject): List<String> {
+        val media = post.optJSONObject("media") ?: return emptyList()
+        val arrays = listOfNotNull(
+            media.optJSONArray("all"),
+            media.optJSONArray("videos"),
+            media.optJSONArray("photos"),
+        )
+        for (arr in arrays) {
+            val urls = (0 until arr.length()).mapNotNull { i ->
+                val item = arr.optJSONObject(i) ?: return@mapNotNull null
+                bestUrl(item)
+            }
+            if (urls.isNotEmpty()) return urls
+        }
+        return emptyList()
+    }
+
+    private fun bestUrl(item: JSONObject): String? {
+        // Para videos, prefiere la variante MP4 de mayor calidad si viene la lista.
+        val variants = item.optJSONArray("variants") ?: item.optJSONArray("formats")
+        if (variants != null) {
+            val best = (0 until variants.length())
+                .mapNotNull { variants.optJSONObject(it) }
+                .filter { (it.optString("content_type") + it.optString("container") + it.optString("url")).contains("mp4") }
+                .maxByOrNull { it.optLong("bitrate", 0) }
+                ?.optString("url")
+            if (!best.isNullOrBlank()) return best
+        }
+        return item.optString("url").takeIf { it.startsWith("http") }
     }
 
     private fun genericMedia(uri: Uri, host: String): String {

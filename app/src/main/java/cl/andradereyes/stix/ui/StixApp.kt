@@ -33,11 +33,8 @@ fun StixApp(vm: MainViewModel) {
     val s by vm.state.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
 
-    LaunchedEffect(s.message) {
-        s.message?.let {
-            vm.consumeMessage()
-            snackbar.showSnackbar(it)
-        }
+    LaunchedEffect(Unit) {
+        vm.messages.collect { snackbar.showSnackbar(it) }
     }
 
     // Al volver a la app (por ejemplo desde WhatsApp) se revisa qué packs ya están agregados.
@@ -78,6 +75,7 @@ fun StixApp(vm: MainViewModel) {
                 } else {
                     HomeScreen(
                         packs = s.packs,
+                        onEmptyClipboard = { vm.showMessage("No hay nada copiado") },
                         added = s.added,
                         fileOf = vm::stickerFile,
                         onLink = vm::openLink,

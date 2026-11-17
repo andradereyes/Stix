@@ -70,6 +70,7 @@ import java.io.File
 @Composable
 fun HomeScreen(
     packs: List<Pack>,
+    onEmptyClipboard: () -> Unit,
     added: Set<String>,
     fileOf: (Pack, String) -> File,
     onLink: (String) -> Unit,
@@ -99,7 +100,7 @@ fun HomeScreen(
                     color = MaterialTheme.colorScheme.primary,
                 )
                 Spacer(Modifier.height(20.dp))
-                InputBar(onLink = onLink, onPick = onPick)
+                InputBar(onLink = onLink, onPick = onPick, onEmptyClipboard = onEmptyClipboard)
             }
         }
 
@@ -119,7 +120,7 @@ fun HomeScreen(
 }
 
 @Composable
-private fun InputBar(onLink: (String) -> Unit, onPick: () -> Unit) {
+private fun InputBar(onLink: (String) -> Unit, onPick: () -> Unit, onEmptyClipboard: () -> Unit) {
     var text by rememberSaveable { mutableStateOf("") }
     val clipboard = LocalClipboardManager.current
     fun submit() {
@@ -138,7 +139,10 @@ private fun InputBar(onLink: (String) -> Unit, onPick: () -> Unit) {
             trailingIcon = {
                 if (text.isBlank()) {
                     // Un toque: pega y abre de inmediato.
-                    IconButton(onClick = { clipboard.getText()?.text?.takeIf { it.isNotBlank() }?.let(onLink) }) {
+                    IconButton(onClick = {
+                        val clip = clipboard.getText()?.text
+                        if (clip.isNullOrBlank()) onEmptyClipboard() else onLink(clip)
+                    }) {
                         Icon(Icons.Rounded.ContentPaste, contentDescription = "Pegar")
                     }
                 } else {
