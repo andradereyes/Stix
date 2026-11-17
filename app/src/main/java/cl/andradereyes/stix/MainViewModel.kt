@@ -77,7 +77,7 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
             showMessage("Eso no parece un link")
             return
         }
-        load { Downloader.fetch(url, app.cacheDir) }
+        load { Downloader.fetch(url, app.cacheDir) { Sources.open(it) } }
     }
 
     fun openUri(uri: Uri) = load {
@@ -85,11 +85,11 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
             val file = File(app.cacheDir, "in_${System.currentTimeMillis()}")
             val input = app.contentResolver.openInputStream(uri) ?: throw UserError("No pude abrir ese archivo")
             input.use { i -> file.outputStream().use { i.copyTo(it) } }
-            file
+            Sources.open(file)
         }
     }
 
-    private fun load(block: suspend () -> File) {
+    private fun load(block: suspend () -> FrameSource) {
         if (_state.value.busy != null) return
         closeEditor()
         _state.update { it.copy(busy = Busy.Loading) }
@@ -98,8 +98,7 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
                 withContext(Dispatchers.IO) {
                     app.cacheDir.listFiles { f -> f.name.startsWith("in_") }?.forEach { it.delete() }
                 }
-                val file = block()
-                val source = withContext(Dispatchers.Default) { Sources.open(file) }
+                val source = block()
                 val preview = withContext(Dispatchers.Default) {
                     source.frameAt(0).copy(Bitmap.Config.ARGB_8888, false)
                 }

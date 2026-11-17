@@ -2,6 +2,7 @@ package cl.andradereyes.stix.media
 
 import android.net.Uri
 import cl.andradereyes.stix.UserError
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -42,68 +43,92 @@ object Downloader {
     fun extractUrl(text: String): String? =
         URL_REGEX.find(text)?.value?.trimEnd('.', ',', ')', ']', '!', '?')
 
-    suspend fun fetch(url: String, dir: File): File = withContext(Dispatchers.IO) {
+    /**
+     * Descarga el medio del link y lo abre con [reader]. Si una URL candidata falla
+     * (descarga o lectura), prueba la siguiente.
+     */
+    suspend fun <T> fetch(url: String, dir: File, reader: (File) -> T): T = withContext(Dispatchers.IO) {
         val uri = Uri.parse(url)
         val host = (uri.host ?: throw UserError("Ese link no es válido"))
             .lowercase().removePrefix("www.").removePrefix("mobile.").removePrefix("m.")
-        val media = if (TWITTER_HOSTS.any { host == it || host.endsWith(".$it") }) {
-            twitterMedia(uri)
+        val candidates = if (TWITTER_HOSTS.any { host == it || host.endsWith(".$it") }) {
+            twitterCandidates(uri)
         } else {
-            genericMedia(uri, host)
+            listOf(genericMedia(uri, host))
         }
-        download(media, dir)
+        // Se guarda el primer error: suele ser el más informativo.
+        var firstError: Exception? = null
+        for (media in candidates.distinct()) {
+            try {
+                val file = download(media, dir)
+                return@withContext reader(file)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (firstError == null) firstError = e
+            }
+        }
+        throw firstError ?: UserError("No pude descargar nada de ese link")
     }
 
-    private fun twitterMedia(uri: Uri): String {
+    /** URLs a probar para un tweet, de la más confiable a la menos. */
+    private fun twitterCandidates(uri: Uri): List<String> {
         val path = uri.path ?: ""
         val id = Regex("""/status(?:es)?/(\d+)""").find(path)?.groupValues?.get(1)
             ?: throw UserError("No encontré el tweet en ese link")
         val index = Regex("""/(?:photo|video)/(\d+)""").find(path)?.groupValues?.get(1)?.toIntOrNull()
+        val out = mutableListOf<String>()
+
         // API v2 (respuesta en "status") y v1 (respuesta en "tweet"), por si una de las dos cambia.
         var sawPost = false
         for (api in listOf("https://api.fxtwitter.com/2/status/$id", "https://api.fxtwitter.com/status/$id")) {
             val json = runCatching { JSONObject(readText(api)) }.getOrNull() ?: continue
             val post = json.optJSONObject("status") ?: json.optJSONObject("tweet") ?: continue
             sawPost = true
-            val urls = mediaUrls(post).ifEmpty {
+            val items = mediaItems(post).ifEmpty {
                 // Si el tweet cita a otro que sí tiene el video, se usa ese.
-                post.optJSONObject("quote")?.let { mediaUrls(it) } ?: emptyList()
+                post.optJSONObject("quote")?.let { mediaItems(it) } ?: emptyList()
             }
-            if (urls.isNotEmpty()) return urls[((index ?: 1) - 1).coerceIn(0, urls.size - 1)]
+            if (items.isNotEmpty()) {
+                val chosen = items[((index ?: 1) - 1).coerceIn(0, items.size - 1)]
+                out += urlsFor(chosen)
+            }
         }
-        if (sawPost) throw UserError("Ese tweet no tiene fotos ni videos")
-        return "https://d.fixupx.com$path"
+        if (sawPost && out.isEmpty()) throw UserError("Ese tweet no tiene fotos ni videos")
+        // Respaldo: enlaces directos de los servicios de embeds.
+        out += "https://d.fixupx.com$path"
+        out += "https://d.fxtwitter.com$path"
+        return out
     }
 
-    private fun mediaUrls(post: JSONObject): List<String> {
+    private fun mediaItems(post: JSONObject): List<JSONObject> {
         val media = post.optJSONObject("media") ?: return emptyList()
-        val arrays = listOfNotNull(
-            media.optJSONArray("all"),
-            media.optJSONArray("videos"),
-            media.optJSONArray("photos"),
-        )
-        for (arr in arrays) {
-            val urls = (0 until arr.length()).mapNotNull { i ->
-                val item = arr.optJSONObject(i) ?: return@mapNotNull null
-                bestUrl(item)
-            }
-            if (urls.isNotEmpty()) return urls
+        for (key in listOf("all", "videos", "photos")) {
+            val arr = media.optJSONArray(key) ?: continue
+            val items = (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }
+            if (items.isNotEmpty()) return items
         }
         return emptyList()
     }
 
-    private fun bestUrl(item: JSONObject): String? {
-        // Para videos, prefiere la variante MP4 de mayor calidad si viene la lista.
+    /** Primero la URL principal; después solo variantes MP4 reales (nunca listas HLS .m3u8). */
+    private fun urlsFor(item: JSONObject): List<String> {
+        val out = mutableListOf<String>()
+        item.optString("url").takeIf { it.startsWith("http") && !it.contains(".m3u8") }?.let { out += it }
         val variants = item.optJSONArray("variants") ?: item.optJSONArray("formats")
         if (variants != null) {
-            val best = (0 until variants.length())
+            (0 until variants.length())
                 .mapNotNull { variants.optJSONObject(it) }
-                .filter { (it.optString("content_type") + it.optString("container") + it.optString("url")).contains("mp4") }
-                .maxByOrNull { it.optLong("bitrate", 0) }
-                ?.optString("url")
-            if (!best.isNullOrBlank()) return best
+                .filter {
+                    val u = it.optString("url")
+                    u.startsWith("http") && !u.contains(".m3u8") &&
+                        (it.optString("content_type") == "video/mp4" || it.optString("container") == "mp4" ||
+                            u.substringBefore('?').endsWith(".mp4"))
+                }
+                .sortedByDescending { it.optLong("bitrate", 0) }
+                .forEach { out += it.optString("url") }
         }
-        return item.optString("url").takeIf { it.startsWith("http") }
+        return out
     }
 
     private fun genericMedia(uri: Uri, host: String): String {

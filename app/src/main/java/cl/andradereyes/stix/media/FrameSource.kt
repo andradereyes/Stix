@@ -34,12 +34,35 @@ class VideoSource(file: File) : FrameSource {
     private val mmr = MediaMetadataRetriever().apply { setDataSource(file.absolutePath) }
     override val durationMs: Long =
         mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-    private val first: Bitmap = grab(0) ?: throw UserError("No pude leer ese video")
+    private val first: Bitmap = grab(0)
+        ?: grab(100)
+        ?: runCatching { mmr.getFrameAtIndex(0) }.getOrNull()?.let(::shrink)
+        ?: throw UserError("No pude leer ese video (${describe(file)})")
     override val width = first.width
     override val height = first.height
 
-    private fun grab(ms: Long): Bitmap? =
-        mmr.getScaledFrameAtTime(ms * 1000, MediaMetadataRetriever.OPTION_CLOSEST, MAX_SIDE, MAX_SIDE)
+    /** Prueba varios métodos: algunos teléfonos fallan con uno y no con otro. */
+    private fun grab(ms: Long): Bitmap? {
+        val us = ms * 1000
+        return runCatching {
+            mmr.getScaledFrameAtTime(us, MediaMetadataRetriever.OPTION_CLOSEST, MAX_SIDE, MAX_SIDE)
+        }.getOrNull()
+            ?: runCatching { mmr.getFrameAtTime(us, MediaMetadataRetriever.OPTION_CLOSEST) }.getOrNull()?.let(::shrink)
+            ?: runCatching { mmr.getFrameAtTime(us, MediaMetadataRetriever.OPTION_CLOSEST_SYNC) }.getOrNull()?.let(::shrink)
+    }
+
+    private fun shrink(b: Bitmap): Bitmap {
+        val m = max(b.width, b.height)
+        if (m <= MAX_SIDE) return b
+        val f = MAX_SIDE.toFloat() / m
+        return Bitmap.createScaledBitmap(b, max(1, (b.width * f).toInt()), max(1, (b.height * f).toInt()), true)
+    }
+
+    private fun describe(file: File): String {
+        val mime = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE) ?: "tipo desconocido"
+        val hasVideo = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO) ?: "?"
+        return "$mime, video=$hasVideo, ${file.length() / 1024} KB"
+    }
 
     override fun frameAt(ms: Long): Bitmap =
         grab(ms.coerceIn(0L, max(0L, durationMs - 1))) ?: first
