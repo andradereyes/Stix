@@ -2,14 +2,11 @@ package cl.andradereyes.stix.ui
 
 import android.graphics.Bitmap
 import android.graphics.Paint
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.border
@@ -279,13 +276,13 @@ fun EditorScreen(
 
                     // Ángulo mientras giras (como en Canva).
                     val angle = (((shown.rotation % 360f) + 360f) % 360f).roundToInt() % 360
-                    AnimatedVisibility(
-                        visible = snap != null && angle != 0,
-                        enter = fadeIn(),
-                        exit = fadeOut(),
-                        modifier = Modifier.align(Alignment.TopCenter).padding(top = 12.dp),
-                    ) {
-                        Surface(shape = CircleShape, color = Color.Black.copy(alpha = 0.6f), contentColor = Color.White) {
+                    if (snap != null && angle != 0) {
+                        Surface(
+                            shape = CircleShape,
+                            color = Color.Black.copy(alpha = 0.6f),
+                            contentColor = Color.White,
+                            modifier = Modifier.align(Alignment.TopCenter).padding(top = 12.dp),
+                        ) {
                             Text(
                                 "$angle°",
                                 style = MaterialTheme.typography.labelLarge,
