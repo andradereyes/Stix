@@ -1,0 +1,22 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Sticker con la esquina despegada -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M38,30 H70 A8,8 0 0 1 78,38 V62 L62,78 H38 A8,8 0 0 1 30,70 V38 A8,8 0 0 1 38,30 Z" />
+    <path
+        android:fillColor="#FFD3CB"
+        android:pathData="M78,62 L67,62 A5,5 0 0 0 62,67 L62,78 Z" />
+    <path
+        android:fillColor="#FF6B57"
+        android:pathData="M41,47a3,3 0 1,0 6,0a3,3 0 1,0 -6,0 M57,47a3,3 0 1,0 6,0a3,3 0 1,0 -6,0" />
+    <path
+        android:strokeColor="#FF6B57"
+        android:strokeWidth="3.5"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000"
+        android:pathData="M43,57 Q52,65 61,57" />
+</vector>
