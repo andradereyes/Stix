@@ -47,7 +47,13 @@ object Downloader {
      * Descarga el medio del link y lo abre con [reader]. Si una URL candidata falla
      * (descarga o lectura), prueba la siguiente.
      */
-    suspend fun <T> fetch(url: String, dir: File, reader: (File) -> T): T = withContext(Dispatchers.IO) {
+    suspend fun <T> fetch(
+        url: String,
+        dir: File,
+        onStage: (String, Float?) -> Unit,
+        reader: (File) -> T,
+    ): T = withContext(Dispatchers.IO) {
+        onStage("Buscando el video", null)
         val uri = Uri.parse(url)
         val host = (uri.host ?: throw UserError("Ese link no es válido"))
             .lowercase().removePrefix("www.").removePrefix("mobile.").removePrefix("m.")
@@ -58,9 +64,12 @@ object Downloader {
         }
         // Se guarda el primer error: suele ser el más informativo.
         var firstError: Exception? = null
-        for (media in candidates.distinct()) {
+        for ((i, media) in candidates.distinct().withIndex()) {
             try {
-                val file = download(media, dir)
+                val label = if (i == 0) "Descargando" else "Probando otra fuente"
+                onStage(label, null)
+                val file = download(media, dir) { p -> onStage(label, p) }
+                onStage("Abriendo", null)
                 return@withContext reader(file)
             } catch (e: CancellationException) {
                 throw e
@@ -180,12 +189,13 @@ object Downloader {
         return URL(base, found).toString()
     }
 
-    private fun download(url: String, dir: File): File {
+    private fun download(url: String, dir: File, onProgress: (Float) -> Unit): File {
         val conn = open(url, UA_BROWSER)
         try {
             val type = conn.contentType?.lowercase() ?: ""
             if (type.contains("html")) throw UserError("Ese link no lleva a un video o una imagen")
-            if (conn.contentLengthLong > MAX_BYTES) throw UserError("El archivo es demasiado grande")
+            val length = conn.contentLengthLong
+            if (length > MAX_BYTES) throw UserError("El archivo es demasiado grande")
             val file = File(dir, "in_${System.currentTimeMillis()}")
             conn.inputStream.use { input ->
                 file.outputStream().use { out ->
@@ -197,6 +207,7 @@ object Downloader {
                         total += n
                         if (total > MAX_BYTES) throw UserError("El archivo es demasiado grande")
                         out.write(buf, 0, n)
+                        if (length > 0) onProgress((total.toFloat() / length).coerceAtMost(1f))
                     }
                 }
             }

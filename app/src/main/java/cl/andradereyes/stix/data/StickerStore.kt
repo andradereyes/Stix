@@ -14,7 +14,11 @@ data class Pack(
     val animated: Boolean,
     val version: Int,
     val stickers: List<String>,
-)
+    /** Versión que se mandó a WhatsApp la última vez. Si es menor que [version], hay que actualizar. */
+    val sentVersion: Int = 0,
+) {
+    val needsUpdate get() = version > sentVersion
+}
 
 /**
  * Guarda los stickers en la memoria interna de la app:
@@ -43,6 +47,7 @@ class StickerStore(context: Context) {
                     animated = o.getBoolean("animated"),
                     version = o.getInt("version"),
                     stickers = List(st.length()) { st.getString(it) },
+                    sentVersion = o.optInt("sentVersion", 0),
                 )
             }
         }.getOrDefault(emptyList())
@@ -93,6 +98,15 @@ class StickerStore(context: Context) {
         write(packs)
     }
 
+    @Synchronized
+    fun markSent(packId: String) {
+        val packs = packs().toMutableList()
+        val i = packs.indexOfFirst { it.id == packId }
+        if (i < 0) return
+        packs[i] = packs[i].copy(sentVersion = packs[i].version)
+        write(packs)
+    }
+
     /** Ícono del pack: primer fotograma del primer sticker, 96x96 PNG. */
     private fun makeTray(pack: Pack) {
         val first = pack.stickers.firstOrNull() ?: return
@@ -115,6 +129,7 @@ class StickerStore(context: Context) {
                     .put("animated", p.animated)
                     .put("version", p.version)
                     .put("stickers", JSONArray(p.stickers))
+                    .put("sentVersion", p.sentVersion)
             )
         }
         val tmp = File(root, "index.json.tmp")

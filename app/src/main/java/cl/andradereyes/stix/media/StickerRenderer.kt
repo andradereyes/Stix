@@ -62,40 +62,64 @@ object StickerRenderer {
         return last
     }
 
-    /** WhatsApp pide WebP animado de 512x512, máximo 500 KB y 10 s. Baja calidad y fps hasta que quepa. */
+    /**
+     * WhatsApp pide WebP animado de 512x512, máximo 500 KB y 10 s.
+     * Baja calidad y fps hasta que quepa. Si un intento se pasa por mucho, salta varios niveles.
+     * onProgress recibe (número de intento, avance 0..1).
+     */
     suspend fun encodeAnimated(
         source: FrameSource,
         t: Transform,
         startMs: Long,
         endMs: Long,
-        onProgress: (Float) -> Unit,
+        onProgress: (Int, Float) -> Unit,
     ): ByteArray {
         val duration = (endMs - startMs).coerceIn(200L, MAX_ANIM_MS)
         val canvas = Bitmap.createBitmap(SIZE, SIZE, Bitmap.Config.ARGB_8888)
         val plans = listOf(15 to 75, 12 to 60, 12 to 45, 10 to 35, 10 to 25, 8 to 18, 6 to 12)
 
-        for ((fps, quality) in plans) {
+        var pi = 0
+        var attempt = 0
+        while (pi < plans.size) {
+            val (fps, quality) = plans[pi]
             val n = max(1, (duration * fps / 1000.0).roundToInt())
             val frameMs = max(MIN_FRAME_MS, (duration / n).toInt())
             val frames = ArrayList<ByteArray>(n)
             var total = 0L
-            var tooBig = false
+            var projected = 0.0
             for (i in 0 until n) {
                 currentCoroutineContext().ensureActive()
                 render(source.frameAt(startMs + i.toLong() * frameMs), t, canvas)
                 val bytes = compress(canvas, quality)
                 frames += bytes
                 total += bytes.size
-                onProgress((i + 1f) / n)
+                onProgress(attempt, (i + 1f) / n)
                 if (total > MAX_ANIM_BYTES) {
-                    tooBig = true
+                    projected = total.toDouble() * n / (i + 1)
                     break
                 }
             }
-            if (tooBig) continue
+            attempt++
+            if (projected > 0) {
+                pi += when {
+                    projected > 3.0 * MAX_ANIM_BYTES -> 3
+                    projected > 1.7 * MAX_ANIM_BYTES -> 2
+                    else -> 1
+                }
+                continue
+            }
             val out = AnimatedWebp.assemble(frames, SIZE, SIZE, frameMs)
             if (out.size <= MAX_ANIM_BYTES) return out
+            pi++
         }
         throw UserError("Quedó muy pesado. Prueba con un clip más corto.")
+    }
+
+    /** Copia reducida de un fotograma (para miniaturas y la vista previa animada). */
+    fun thumb(b: Bitmap, maxSide: Int): Bitmap {
+        val m = max(b.width, b.height)
+        if (m <= maxSide) return b.copy(Bitmap.Config.ARGB_8888, false)
+        val f = maxSide.toFloat() / m
+        return Bitmap.createScaledBitmap(b, max(1, (b.width * f).toInt()), max(1, (b.height * f).toInt()), true)
     }
 }

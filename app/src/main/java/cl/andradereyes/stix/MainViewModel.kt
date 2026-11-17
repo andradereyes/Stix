@@ -18,9 +18,9 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -32,10 +32,8 @@ import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import kotlin.math.min
 
-sealed interface Busy {
-    data object Loading : Busy
-    data class Rendering(val progress: Float) : Busy
-}
+/** Qué está haciendo la app ahora. progress = null significa "sin porcentaje". */
+data class Busy(val label: String, val progress: Float? = null)
 
 data class EditorState(
     val source: FrameSource,
@@ -44,8 +42,12 @@ data class EditorState(
     val animated: Boolean,
     val startMs: Long = 0,
     val endMs: Long,
+    val filmstrip: List<Bitmap> = emptyList(),
+    val playFrames: List<Bitmap>? = null,
+    val loadingPlayback: Boolean = false,
 ) {
     val canAnimate get() = source.durationMs > 0
+    val playFrameMs get() = playFrames?.let { ((endMs - startMs) / it.size.coerceAtLeast(1)).coerceAtLeast(30L) } ?: 100L
 }
 
 data class UiState(
@@ -69,6 +71,9 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
     private var previewJob: Job? = null
     private var workJob: Job? = null
 
+    private fun busy(label: String, progress: Float? = null) =
+        _state.update { it.copy(busy = Busy(label, progress)) }
+
     // ---------- Entrada ----------
 
     fun openLink(text: String) {
@@ -77,11 +82,14 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
             showMessage("Eso no parece un link")
             return
         }
-        load { Downloader.fetch(url, app.cacheDir) { Sources.open(it) } }
+        load {
+            Downloader.fetch(url, app.cacheDir, onStage = { label, p -> busy(label, p) }) { Sources.open(it) }
+        }
     }
 
     fun openUri(uri: Uri) = load {
         withContext(Dispatchers.IO) {
+            busy("Abriendo archivo")
             val file = File(app.cacheDir, "in_${System.currentTimeMillis()}")
             val input = app.contentResolver.openInputStream(uri) ?: throw UserError("No pude abrir ese archivo")
             input.use { i -> file.outputStream().use { i.copyTo(it) } }
@@ -92,13 +100,14 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
     private fun load(block: suspend () -> FrameSource) {
         if (_state.value.busy != null) return
         closeEditor()
-        _state.update { it.copy(busy = Busy.Loading) }
+        busy("Preparando")
         workJob = viewModelScope.launch {
             try {
                 withContext(Dispatchers.IO) {
                     app.cacheDir.listFiles { f -> f.name.startsWith("in_") }?.forEach { it.delete() }
                 }
                 val source = block()
+                busy("Preparando editor")
                 val preview = withContext(Dispatchers.Default) {
                     source.frameAt(0).copy(Bitmap.Config.ARGB_8888, false)
                 }
@@ -112,6 +121,7 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
                         )
                     )
                 }
+                if (source.durationMs > 0) loadFilmstrip(source)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -124,15 +134,27 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
 
     // ---------- Editor ----------
 
+    private fun loadFilmstrip(source: FrameSource) {
+        viewModelScope.launch {
+            val thumbs = withContext(Dispatchers.Default) {
+                sourceLock.withLock {
+                    val n = 8
+                    List(n) { i -> StickerRenderer.thumb(source.frameAt(source.durationMs * i / n), 160) }
+                }
+            }
+            updateEditor(source) { it.copy(filmstrip = thumbs) }
+        }
+    }
+
     fun setAnimated(animated: Boolean) {
         val ed = _state.value.editor ?: return
-        _state.update { it.copy(editor = ed.copy(animated = animated)) }
+        updateEditor(ed.source) { it.copy(animated = animated) }
         if (animated) previewAt(ed.startMs)
     }
 
     fun setRange(startMs: Long, endMs: Long) {
         val ed = _state.value.editor ?: return
-        _state.update { it.copy(editor = ed.copy(startMs = startMs, endMs = endMs)) }
+        updateEditor(ed.source) { it.copy(startMs = startMs, endMs = endMs, playFrames = null, loadingPlayback = false) }
         previewAt(startMs)
     }
 
@@ -143,10 +165,36 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
             val bmp = withContext(Dispatchers.Default) {
                 sourceLock.withLock { ed.source.frameAt(ms).copy(Bitmap.Config.ARGB_8888, false) }
             }
-            _state.update { st ->
-                val cur = st.editor
-                if (cur != null && cur.source === ed.source) st.copy(editor = cur.copy(preview = bmp, previewMs = ms)) else st
+            updateEditor(ed.source) { it.copy(preview = bmp, previewMs = ms) }
+        }
+    }
+
+    /** Saca los fotogramas del tramo elegido (en baja resolución) para reproducirlos en el editor. */
+    fun preparePlayback() {
+        val ed = _state.value.editor ?: return
+        if (ed.playFrames != null || ed.loadingPlayback || !ed.canAnimate) return
+        updateEditor(ed.source) { it.copy(loadingPlayback = true) }
+        val start = ed.startMs
+        val end = ed.endMs
+        viewModelScope.launch {
+            val frames = withContext(Dispatchers.Default) {
+                sourceLock.withLock {
+                    val dur = (end - start).coerceAtLeast(100L)
+                    val n = (dur / 100L).toInt().coerceIn(2, 80)
+                    List(n) { i -> StickerRenderer.thumb(ed.source.frameAt(start + dur * i / n), 360) }
+                }
             }
+            updateEditor(ed.source) {
+                if (it.startMs == start && it.endMs == end) it.copy(playFrames = frames, loadingPlayback = false)
+                else it.copy(loadingPlayback = false)
+            }
+        }
+    }
+
+    private fun updateEditor(source: FrameSource, change: (EditorState) -> EditorState) {
+        _state.update { st ->
+            val cur = st.editor
+            if (cur != null && cur.source === source) st.copy(editor = change(cur)) else st
         }
     }
 
@@ -160,23 +208,36 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
     fun save(t: Transform) {
         val ed = _state.value.editor ?: return
         if (_state.value.busy != null) return
-        _state.update { it.copy(busy = Busy.Rendering(0f)) }
+        val animated = ed.animated && ed.canAnimate
+        busy("Creando sticker", 0f)
         workJob = viewModelScope.launch {
             try {
                 val bytes = withContext(Dispatchers.Default) {
                     sourceLock.withLock {
-                        if (ed.animated && ed.canAnimate) {
-                            StickerRenderer.encodeAnimated(ed.source, t, ed.startMs, ed.endMs) { p ->
-                                _state.update { it.copy(busy = Busy.Rendering(p)) }
+                        if (animated) {
+                            StickerRenderer.encodeAnimated(ed.source, t, ed.startMs, ed.endMs) { attempt, p ->
+                                busy(
+                                    if (attempt == 0) "Creando sticker" else "Ajustando el peso para WhatsApp (${attempt + 1})",
+                                    p,
+                                )
                             }
                         } else {
                             StickerRenderer.encodeStatic(StickerRenderer.render(ed.preview, t))
                         }
                     }
                 }
-                withContext(Dispatchers.IO) { store.add(bytes, ed.animated && ed.canAnimate) }
+                busy("Guardando")
+                val pack = withContext(Dispatchers.IO) { store.add(bytes, animated) }
                 closeEditor()
                 _state.update { it.copy(packs = store.packs()) }
+                val missing = StickerStore.MIN_PER_PACK - pack.stickers.size
+                showMessage(
+                    when {
+                        missing > 0 -> "Listo. Faltan $missing para poder agregar el pack a WhatsApp"
+                        pack.id in _state.value.added -> "Listo. Toca «Actualizar» en el pack para verlo en WhatsApp"
+                        else -> "Listo. Ya puedes agregar el pack a WhatsApp"
+                    }
+                )
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -204,6 +265,13 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
     }
 
     fun addIntent(pack: Pack): Intent? = WhatsApp.addIntent(app, pack)
+
+    fun markSent(packId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            store.markSent(packId)
+            _state.update { it.copy(packs = store.packs()) }
+        }
+    }
 
     fun refreshAdded() {
         viewModelScope.launch(Dispatchers.IO) {

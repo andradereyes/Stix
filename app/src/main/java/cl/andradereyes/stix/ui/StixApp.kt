@@ -12,7 +12,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -20,7 +20,9 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -46,10 +48,15 @@ fun StixApp(vm: MainViewModel) {
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         uri?.let(vm::openUri)
     }
+    var pendingPack by remember { mutableStateOf<String?>(null) }
     val whatsapp = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
-        if (r.resultCode == Activity.RESULT_CANCELED) {
-            r.data?.getStringExtra("validation_error")?.let { vm.showMessage("WhatsApp: $it") }
+        val error = r.data?.getStringExtra("validation_error")
+        if (r.resultCode == Activity.RESULT_CANCELED && error != null) {
+            vm.showMessage("WhatsApp: $error")
+        } else {
+            pendingPack?.let(vm::markSent)
         }
+        pendingPack = null
         vm.refreshAdded()
     }
 
@@ -69,13 +76,13 @@ fun StixApp(vm: MainViewModel) {
                         onAnimated = vm::setAnimated,
                         onRange = vm::setRange,
                         onFrame = vm::previewAt,
+                        onPreparePlay = vm::preparePlayback,
                         onClose = vm::closeEditor,
                         onSave = vm::save,
                     )
                 } else {
                     HomeScreen(
                         packs = s.packs,
-                        onEmptyClipboard = { vm.showMessage("No hay nada copiado") },
                         added = s.added,
                         fileOf = vm::stickerFile,
                         onLink = vm::openLink,
@@ -88,12 +95,14 @@ fun StixApp(vm: MainViewModel) {
                                 vm.showMessage("No encontré WhatsApp en este teléfono")
                             } else {
                                 try {
+                                    pendingPack = pack.id
                                     whatsapp.launch(intent)
                                 } catch (e: ActivityNotFoundException) {
                                     vm.showMessage("Tu WhatsApp no acepta packs externos")
                                 }
                             }
                         },
+                        onEmptyClipboard = { vm.showMessage("No hay nada copiado") },
                         onDelete = vm::delete,
                     )
                 }
@@ -101,9 +110,10 @@ fun StixApp(vm: MainViewModel) {
 
             s.busy?.let { BusyOverlay(it, onCancel = vm::cancelWork) }
 
+            // Los avisos salen arriba para no tapar la barra de abajo.
             SnackbarHost(
                 snackbar,
-                Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(16.dp),
+                Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(16.dp),
             )
         }
     }
