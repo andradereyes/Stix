@@ -23,14 +23,44 @@ data class Transform(
     val flip: Boolean = false,
 )
 
+/** Cómo termina la animación para que el bucle se vea bien. */
+enum class LoopMode {
+    /** Tal cual. */
+    NORMAL,
+
+    /** Va hacia adelante y vuelve hacia atrás. Dura el doble que el tramo elegido. */
+    BOOMERANG,
+
+    /** El final se funde con el inicio, así el bucle no tiene corte. */
+    CROSSFADE,
+}
+
 object StickerRenderer {
     const val SIZE = 512
     private const val MAX_STATIC_BYTES = 100 * 1024
     private const val MAX_ANIM_BYTES = 500 * 1024
-    const val MAX_ANIM_MS = 8_000L
+    /** Duración máxima del sticker terminado. */
+    const val MAX_ANIM_MS = 5_000L
     private const val MIN_FRAME_MS = 20
 
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
+
+    /** Tramo máximo que se puede elegir según el modo (el bumerán dura el doble). */
+    fun maxClipMs(loop: LoopMode) = if (loop == LoopMode.BOOMERANG) MAX_ANIM_MS / 2 else MAX_ANIM_MS
+
+    /** Cuántos fotogramas del final se funden con el inicio. */
+    fun fadeFrames(n: Int) = (n * 0.3).roundToInt().coerceIn(1, max(1, n - 1))
+
+    /** Dibuja [over] encima de [base] con transparencia [alpha] (0..1). */
+    fun blendInto(base: Bitmap, over: Bitmap, alpha: Float) {
+        val p = Paint(Paint.FILTER_BITMAP_FLAG).apply { this.alpha = (alpha * 255).roundToInt().coerceIn(0, 255) }
+        val c = Canvas(base)
+        if (over.width == base.width && over.height == base.height) {
+            c.drawBitmap(over, 0f, 0f, p)
+        } else {
+            c.drawBitmap(over, null, android.graphics.Rect(0, 0, base.width, base.height), p)
+        }
+    }
 
     /** La misma matriz se usa para la vista previa (out = tamaño en pantalla) y para el archivo (out = 512). */
     fun matrix(srcW: Int, srcH: Int, t: Transform, out: Float): Matrix {
@@ -63,7 +93,7 @@ object StickerRenderer {
     }
 
     /**
-     * WhatsApp pide WebP animado de 512x512, máximo 500 KB y 10 s.
+     * WhatsApp pide WebP animado de 512x512 y máximo 500 KB. Aquí además se limita a 5 s.
      * Baja calidad y fps hasta que quepa. Si un intento se pasa por mucho, salta varios niveles.
      * onProgress recibe (número de intento, avance 0..1).
      */
@@ -72,30 +102,40 @@ object StickerRenderer {
         t: Transform,
         startMs: Long,
         endMs: Long,
+        loop: LoopMode,
         onProgress: (Int, Float) -> Unit,
     ): ByteArray {
-        val duration = (endMs - startMs).coerceIn(200L, MAX_ANIM_MS)
+        val duration = (endMs - startMs).coerceIn(200L, maxClipMs(loop))
         val canvas = Bitmap.createBitmap(SIZE, SIZE, Bitmap.Config.ARGB_8888)
         val plans = listOf(15 to 75, 12 to 60, 12 to 45, 10 to 35, 10 to 25, 8 to 18, 6 to 12)
+        // El bumerán repite casi todos los fotogramas: el archivo final pesa casi el doble.
+        val weight = if (loop == LoopMode.BOOMERANG) 2.0 else 1.0
 
         var pi = 0
         var attempt = 0
         while (pi < plans.size) {
             val (fps, quality) = plans[pi]
-            val n = max(1, (duration * fps / 1000.0).roundToInt())
+            val n = max(2, (duration * fps / 1000.0).roundToInt())
             val frameMs = max(MIN_FRAME_MS, (duration / n).toInt())
+            val fade = if (loop == LoopMode.CROSSFADE) fadeFrames(n) else 0
+            var first: Bitmap? = null
             val frames = ArrayList<ByteArray>(n)
             var total = 0L
             var projected = 0.0
             for (i in 0 until n) {
                 currentCoroutineContext().ensureActive()
                 render(source.frameAt(startMs + i.toLong() * frameMs), t, canvas)
+                if (loop == LoopMode.CROSSFADE) {
+                    if (i == 0) first = canvas.copy(Bitmap.Config.ARGB_8888, false)
+                    val k = i - (n - fade)
+                    if (k >= 0) first?.let { blendInto(canvas, it, (k + 1f) / (fade + 1f)) }
+                }
                 val bytes = compress(canvas, quality)
                 frames += bytes
                 total += bytes.size
                 onProgress(attempt, (i + 1f) / n)
-                if (total > MAX_ANIM_BYTES) {
-                    projected = total.toDouble() * n / (i + 1)
+                if (total * weight > MAX_ANIM_BYTES) {
+                    projected = total.toDouble() * weight * n / (i + 1)
                     break
                 }
             }
@@ -108,7 +148,12 @@ object StickerRenderer {
                 }
                 continue
             }
-            val out = AnimatedWebp.assemble(frames, SIZE, SIZE, frameMs)
+            val sequence = if (loop == LoopMode.BOOMERANG && frames.size > 2) {
+                frames + frames.subList(1, frames.size - 1).asReversed()
+            } else {
+                frames
+            }
+            val out = AnimatedWebp.assemble(sequence, SIZE, SIZE, frameMs)
             if (out.size <= MAX_ANIM_BYTES) return out
             pi++
         }

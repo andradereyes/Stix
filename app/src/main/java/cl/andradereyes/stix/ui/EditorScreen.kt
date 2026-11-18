@@ -35,6 +35,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowForward
 import androidx.compose.material.icons.automirrored.rounded.Redo
 import androidx.compose.material.icons.automirrored.rounded.RotateRight
 import androidx.compose.material.icons.automirrored.rounded.Undo
@@ -43,14 +44,17 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Crop
 import androidx.compose.material.icons.rounded.FitScreen
 import androidx.compose.material.icons.rounded.Flip
+import androidx.compose.material.icons.rounded.Gradient
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.Movie
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -90,6 +94,7 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import cl.andradereyes.stix.EditorState
+import cl.andradereyes.stix.media.LoopMode
 import cl.andradereyes.stix.media.StickerRenderer
 import cl.andradereyes.stix.media.Transform
 import kotlinx.coroutines.delay
@@ -106,6 +111,7 @@ fun EditorScreen(
     onRange: (Long, Long) -> Unit,
     onFrame: (Long) -> Unit,
     onPreparePlay: () -> Unit,
+    onLoop: (LoopMode) -> Unit,
     onClose: () -> Unit,
     onSave: (Transform) -> Unit,
 ) {
@@ -149,7 +155,11 @@ fun EditorScreen(
             }
         }
     }
+    LaunchedEffect(playing, frames == null) {
+        if (playing && frames == null) onPreparePlay()
+    }
     val animatedMode = ed.animated && ed.canAnimate
+    val playheadMs: Long? = if (playing && frames != null) ed.playTimes.getOrNull(frame % frames.size) else null
     if (!animatedMode && playing) playing = false
     val bitmap: Bitmap = if (playing && frames != null) frames[frame % frames.size] else ed.preview
 
@@ -300,10 +310,7 @@ fun EditorScreen(
                             label = "a",
                         )
                         FilledIconButton(
-                            onClick = {
-                                if (!playing && frames == null) onPreparePlay()
-                                playing = !playing
-                            },
+                            onClick = { playing = !playing },
                             modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp).size(48.dp),
                         ) {
                             Icon(
@@ -337,17 +344,38 @@ fun EditorScreen(
 
             Spacer(Modifier.height(14.dp))
 
-            // Tiempo: tira de fotogramas + rango del clip (animado) o fotograma elegido (fijo).
+            // Tiempo: modo de bucle + tira de fotogramas + rango (animado) o fotograma elegido (fijo).
             if (ed.canAnimate) {
                 val totalS = ed.source.durationMs / 1000f
                 Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp)) {
                     if (ed.animated) {
-                        var range by remember(ed.source) { mutableStateOf(ed.startMs / 1000f..ed.endMs / 1000f) }
-                        Filmstrip(ed.filmstrip, start = range.start / totalS, end = range.endInclusive / totalS)
+                        Row(
+                            Modifier.fillMaxWidth().padding(bottom = 10.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                        ) {
+                            LoopChip(Icons.AutoMirrored.Rounded.ArrowForward, "Normal", ed.loop == LoopMode.NORMAL) {
+                                onLoop(LoopMode.NORMAL)
+                            }
+                            LoopChip(Icons.Rounded.SwapHoriz, "Bumerán", ed.loop == LoopMode.BOOMERANG) {
+                                onLoop(LoopMode.BOOMERANG)
+                            }
+                            LoopChip(Icons.Rounded.Gradient, "Fundido", ed.loop == LoopMode.CROSSFADE) {
+                                onLoop(LoopMode.CROSSFADE)
+                            }
+                        }
+                        val maxLen = StickerRenderer.maxClipMs(ed.loop) / 1000f
+                        var range by remember(ed.source, ed.loop) {
+                            mutableStateOf(ed.startMs / 1000f..ed.endMs / 1000f)
+                        }
+                        Filmstrip(
+                            ed.filmstrip,
+                            start = range.start / totalS,
+                            end = range.endInclusive / totalS,
+                            marker = playheadMs?.let { it / 1000f / totalS },
+                        )
                         RangeSlider(
                             value = range,
                             onValueChange = { r ->
-                                val maxLen = StickerRenderer.MAX_ANIM_MS / 1000f
                                 range = if (r.endInclusive - r.start <= maxLen) r
                                 else if (r.start != range.start) r.start..(r.start + maxLen)
                                 else (r.endInclusive - maxLen)..r.endInclusive
@@ -358,9 +386,12 @@ fun EditorScreen(
                             },
                             valueRange = 0f..totalS,
                         )
+                        val clip = range.endInclusive - range.start
+                        val finalLen = if (ed.loop == LoopMode.BOOMERANG) clip * 2 else clip
                         TimeLabels(
-                            left = "${fmt(range.start)} – ${fmt(range.endInclusive)}",
-                            right = fmt(range.endInclusive - range.start),
+                            left = playheadMs?.let { "▶ ${fmt(it / 1000f)}" }
+                                ?: "${fmt(range.start)} – ${fmt(range.endInclusive)}",
+                            right = "${fmt(finalLen)} de ${fmt(StickerRenderer.MAX_ANIM_MS / 1000f)}",
                         )
                     } else {
                         var pos by remember(ed.source) { mutableFloatStateOf(ed.previewMs / 1000f) }
@@ -387,6 +418,17 @@ private fun ModeLabel(icon: ImageVector, text: String) {
         Spacer(Modifier.width(6.dp))
         Text(text, style = MaterialTheme.typography.labelLarge)
     }
+}
+
+@Composable
+private fun LoopChip(icon: ImageVector, label: String, selected: Boolean, onClick: () -> Unit) {
+    FilterChip(
+        selected = selected,
+        onClick = onClick,
+        label = { Text(label) },
+        leadingIcon = { Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp)) },
+        shape = CircleShape,
+    )
 }
 
 @Composable
@@ -417,11 +459,11 @@ private fun Filmstrip(thumbs: List<Bitmap>, start: Float = 0f, end: Float = 1f, 
             .drawWithContent {
                 drawContent()
                 val dim = Color.Black.copy(alpha = 0.55f)
-                if (marker == null) {
-                    drawRect(dim, Offset.Zero, Size(size.width * start, size.height))
-                    drawRect(dim, Offset(size.width * end, 0f), Size(size.width * (1f - end), size.height))
-                } else {
-                    val x = size.width * marker
+                drawRect(dim, Offset.Zero, Size(size.width * start, size.height))
+                drawRect(dim, Offset(size.width * end, 0f), Size(size.width * (1f - end), size.height))
+                if (marker != null) {
+                    val x = (size.width * marker).coerceIn(2.dp.toPx(), size.width - 2.dp.toPx())
+                    drawLine(Color.White, Offset(x, 0f), Offset(x, size.height), 5.dp.toPx())
                     drawLine(accent, Offset(x, 0f), Offset(x, size.height), 3.dp.toPx())
                 }
             }

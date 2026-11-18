@@ -11,6 +11,7 @@ import cl.andradereyes.stix.data.StickerStore
 import cl.andradereyes.stix.data.WhatsApp
 import cl.andradereyes.stix.media.Downloader
 import cl.andradereyes.stix.media.FrameSource
+import cl.andradereyes.stix.media.LoopMode
 import cl.andradereyes.stix.media.Sources
 import cl.andradereyes.stix.media.StickerRenderer
 import cl.andradereyes.stix.media.Transform
@@ -43,11 +44,14 @@ data class EditorState(
     val startMs: Long = 0,
     val endMs: Long,
     val filmstrip: List<Bitmap> = emptyList(),
+    val loop: LoopMode = LoopMode.NORMAL,
     val playFrames: List<Bitmap>? = null,
+    /** Momento del video (ms) que corresponde a cada fotograma de la vista previa. */
+    val playTimes: List<Long> = emptyList(),
+    val playFrameMs: Long = 100L,
     val loadingPlayback: Boolean = false,
 ) {
     val canAnimate get() = source.durationMs > 0
-    val playFrameMs get() = playFrames?.let { ((endMs - startMs) / it.size.coerceAtLeast(1)).coerceAtLeast(30L) } ?: 100L
 }
 
 data class UiState(
@@ -117,7 +121,7 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
                             source = source,
                             preview = preview,
                             animated = source.durationMs > 0,
-                            endMs = min(source.durationMs, DEFAULT_CLIP_MS),
+                            endMs = min(source.durationMs, StickerRenderer.MAX_ANIM_MS),
                         )
                     )
                 }
@@ -152,9 +156,20 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
         if (animated) previewAt(ed.startMs)
     }
 
+    fun setLoop(loop: LoopMode) {
+        val ed = _state.value.editor ?: return
+        val maxLen = StickerRenderer.maxClipMs(loop)
+        val end = if (ed.endMs - ed.startMs > maxLen) ed.startMs + maxLen else ed.endMs
+        updateEditor(ed.source) {
+            it.copy(loop = loop, endMs = end, playFrames = null, playTimes = emptyList(), loadingPlayback = false)
+        }
+    }
+
     fun setRange(startMs: Long, endMs: Long) {
         val ed = _state.value.editor ?: return
-        updateEditor(ed.source) { it.copy(startMs = startMs, endMs = endMs, playFrames = null, loadingPlayback = false) }
+        updateEditor(ed.source) {
+            it.copy(startMs = startMs, endMs = endMs, playFrames = null, playTimes = emptyList(), loadingPlayback = false)
+        }
         previewAt(startMs)
     }
 
@@ -169,24 +184,51 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Saca los fotogramas del tramo elegido (en baja resolución) para reproducirlos en el editor. */
+    /**
+     * Saca los fotogramas del tramo elegido (en baja resolución) para reproducirlos en el editor,
+     * ya con el efecto de bucle aplicado, igual que quedará el sticker.
+     */
     fun preparePlayback() {
         val ed = _state.value.editor ?: return
         if (ed.playFrames != null || ed.loadingPlayback || !ed.canAnimate) return
         updateEditor(ed.source) { it.copy(loadingPlayback = true) }
         val start = ed.startMs
         val end = ed.endMs
+        val loop = ed.loop
         viewModelScope.launch {
-            val frames = withContext(Dispatchers.Default) {
-                sourceLock.withLock {
-                    val dur = (end - start).coerceAtLeast(100L)
-                    val n = (dur / 100L).toInt().coerceIn(2, 80)
-                    List(n) { i -> StickerRenderer.thumb(ed.source.frameAt(start + dur * i / n), 360) }
+            val dur = (end - start).coerceAtLeast(100L)
+            val n = (dur / 100L).toInt().coerceIn(2, 50)
+            val times = List(n) { i -> start + dur * i / n }
+            val forward = withContext(Dispatchers.Default) {
+                sourceLock.withLock { times.map { StickerRenderer.thumb(ed.source.frameAt(it), 360) } }
+            }
+            val (frames, frameTimes) = withContext(Dispatchers.Default) {
+                when (loop) {
+                    LoopMode.NORMAL -> forward to times
+                    LoopMode.BOOMERANG -> {
+                        val back = forward.subList(1, n - 1).asReversed()
+                        val backTimes = times.subList(1, n - 1).asReversed()
+                        (forward + back) to (times + backTimes)
+                    }
+                    LoopMode.CROSSFADE -> {
+                        val fade = StickerRenderer.fadeFrames(n)
+                        val blended = forward.mapIndexed { i, b ->
+                            val k = i - (n - fade)
+                            if (k < 0) b
+                            else b.copy(Bitmap.Config.ARGB_8888, true).also {
+                                StickerRenderer.blendInto(it, forward[0], (k + 1f) / (fade + 1f))
+                            }
+                        }
+                        blended to times
+                    }
                 }
             }
             updateEditor(ed.source) {
-                if (it.startMs == start && it.endMs == end) it.copy(playFrames = frames, loadingPlayback = false)
-                else it.copy(loadingPlayback = false)
+                if (it.startMs == start && it.endMs == end && it.loop == loop) {
+                    it.copy(playFrames = frames, playTimes = frameTimes, playFrameMs = dur / n, loadingPlayback = false)
+                } else {
+                    it.copy(loadingPlayback = false)
+                }
             }
         }
     }
@@ -215,7 +257,7 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
                 val bytes = withContext(Dispatchers.Default) {
                     sourceLock.withLock {
                         if (animated) {
-                            StickerRenderer.encodeAnimated(ed.source, t, ed.startMs, ed.endMs) { attempt, p ->
+                            StickerRenderer.encodeAnimated(ed.source, t, ed.startMs, ed.endMs, ed.loop) { attempt, p ->
                                 busy(
                                     if (attempt == 0) "Creando sticker" else "Ajustando el peso para WhatsApp (${attempt + 1})",
                                     p,
@@ -298,7 +340,4 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
         _state.value.editor?.source?.close()
     }
 
-    private companion object {
-        const val DEFAULT_CLIP_MS = 5_000L
-    }
 }

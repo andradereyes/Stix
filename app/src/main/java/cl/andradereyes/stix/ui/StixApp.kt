@@ -77,6 +77,7 @@ fun StixApp(vm: MainViewModel) {
                         onRange = vm::setRange,
                         onFrame = vm::previewAt,
                         onPreparePlay = vm::preparePlayback,
+                        onLoop = vm::setLoop,
                         onClose = vm::closeEditor,
                         onSave = vm::save,
                     )

@@ -66,7 +66,7 @@ object Downloader {
         var firstError: Exception? = null
         for ((i, media) in candidates.distinct().withIndex()) {
             try {
-                val label = if (i == 0) "Descargando" else "Probando otra fuente"
+                val label = if (i == 0) "Descargando" else "Probando otra calidad"
                 onStage(label, null)
                 val file = download(media, dir) { p -> onStage(label, p) }
                 onStage("Abriendo", null)
@@ -120,13 +120,16 @@ object Downloader {
         return emptyList()
     }
 
-    /** Primero la URL principal; después solo variantes MP4 reales (nunca listas HLS .m3u8). */
+    /**
+     * Orden de prueba: MP4 de calidad media primero (descarga rápida y casi siempre H.264,
+     * que Android lee sin problemas), después los más pesados, y al final la URL principal.
+     * Nunca listas HLS (.m3u8).
+     */
     private fun urlsFor(item: JSONObject): List<String> {
         val out = mutableListOf<String>()
-        item.optString("url").takeIf { it.startsWith("http") && !it.contains(".m3u8") }?.let { out += it }
         val variants = item.optJSONArray("variants") ?: item.optJSONArray("formats")
         if (variants != null) {
-            (0 until variants.length())
+            val mp4 = (0 until variants.length())
                 .mapNotNull { variants.optJSONObject(it) }
                 .filter {
                     val u = it.optString("url")
@@ -134,9 +137,11 @@ object Downloader {
                         (it.optString("content_type") == "video/mp4" || it.optString("container") == "mp4" ||
                             u.substringBefore('?').endsWith(".mp4"))
                 }
-                .sortedByDescending { it.optLong("bitrate", 0) }
-                .forEach { out += it.optString("url") }
+            val (light, heavy) = mp4.partition { it.optLong("bitrate", 0) <= 2_500_000 }
+            light.sortedByDescending { it.optLong("bitrate", 0) }.forEach { out += it.optString("url") }
+            heavy.sortedBy { it.optLong("bitrate", 0) }.forEach { out += it.optString("url") }
         }
+        item.optString("url").takeIf { it.startsWith("http") && !it.contains(".m3u8") }?.let { out += it }
         return out
     }
 
