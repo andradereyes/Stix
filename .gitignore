@@ -6,3 +6,8 @@ local.properties
 .DS_Store
 captures/
 .kotlin/
+
+# Llaves de firma (no se suben)
+keystore/
+*.jks
+keystore.properties

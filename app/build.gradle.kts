@@ -18,13 +18,17 @@ android {
         versionName = "1.0.$buildNumber"
     }
 
-    // Llave fija para que cada APK nuevo se instale encima del anterior.
+    // Llave fija para que cada APK nuevo se instale encima del anterior. No está en el repositorio:
+    // GitHub Actions la crea desde los secretos KEYSTORE_BASE64 y KEYSTORE_PASSWORD. Sin ella se usa
+    // la llave de depuración.
+    val releaseKeystore = rootProject.file("keystore/release.jks")
+    val keystorePassword = System.getenv("KEYSTORE_PASSWORD")
     signingConfigs {
-        create("stix") {
-            storeFile = rootProject.file("keystore/stix.jks")
-            storePassword = "stixstix"
+        if (releaseKeystore.exists() && !keystorePassword.isNullOrEmpty()) create("stix") {
+            storeFile = releaseKeystore
+            storePassword = keystorePassword
             keyAlias = "stix"
-            keyPassword = "stixstix"
+            keyPassword = keystorePassword
         }
     }
 
@@ -33,10 +37,10 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = signingConfigs.getByName("stix")
+            signingConfig = signingConfigs.findByName("stix") ?: signingConfigs.getByName("debug")
         }
         debug {
-            signingConfig = signingConfigs.getByName("stix")
+            signingConfigs.findByName("stix")?.let { signingConfig = it }
         }
     }
 

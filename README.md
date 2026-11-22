@@ -26,4 +26,4 @@ Los stickers nuevos de un pack ya agregado aparecen solos en WhatsApp.
 - Kotlin + Jetpack Compose, minSdk 30.
 - Tweets vía la API pública de FxTwitter; otras redes vía sus servicios de embeds o etiquetas `og:video`.
 - WebP animado armado a mano (`media/AnimatedWebp.kt`) a partir de fotogramas de `Bitmap.compress`, ajustando calidad y fps hasta quedar bajo los 500 KB que pide WhatsApp.
-- `keystore/stix.jks` es una llave de firma solo para uso personal (contraseña `stixstix`).
+- Las APK se firman con una llave que no está en el repositorio: GitHub Actions la toma de los secretos `KEYSTORE_BASE64` y `KEYSTORE_PASSWORD`.
